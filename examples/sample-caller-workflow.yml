@@ -1,0 +1,122 @@
+# Sample caller workflow — copy this into your app repo to use the Mobile CI Engine.
+#
+# 1. Save as .github/workflows/build-mobile.yml (or similar) in your repo.
+# 2. Uses sanskari27/rn-builder-ci; if you use your own fork, replace with YOUR_USERNAME/rn-builder-ci.
+# 3. Use a tag (e.g. @v1 or @v1.0.0); never use @main.
+# 4. Add the required secrets for production builds (see docs/secrets.md).
+
+name: Build Mobile
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to build'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - android
+          - ios
+          - both
+      build_type:
+        description: 'Build type (omit or release for auto-detect)'
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - apk
+          - aab
+          - release
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      version_bump:
+        description: 'Run version bump script if present'
+        required: false
+        default: false
+        type: boolean
+      android_module:
+        description: 'Android Gradle module (default: app)'
+        required: false
+        default: 'app'
+        type: string
+      android_flavor:
+        description: 'Android product flavor (optional)'
+        required: false
+        default: ''
+        type: string
+      ios_scheme:
+        description: 'Xcode scheme (optional, auto if empty)'
+        required: false
+        default: ''
+        type: string
+      ios_configuration:
+        description: 'Xcode configuration (optional, empty = auto)'
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - Debug
+          - Release
+      ios_workspace:
+        description: 'Path to .xcworkspace or .xcodeproj relative to ios/ (optional)'
+        required: false
+        default: ''
+        type: string
+      ios_export_method:
+        description: 'IPA export method (optional, empty = auto from environment)'
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - app-store
+          - ad-hoc
+          - enterprise
+          - development
+      # workflow_dispatch does not support type: number; engine accepts string coercion
+      artifact_retention_days:
+        description: 'Artifact retention (days)'
+        required: false
+        default: '14'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    id: build
+    uses: sanskari27/rn-builder-ci/.github/workflows/mobile-build.yml@v1
+    with:
+      platform: ${{ inputs.platform }}
+      build_type: ${{ inputs.build_type }}
+      environment: ${{ inputs.environment }}
+      version_bump: ${{ inputs.version_bump }}
+      android_module: ${{ inputs.android_module }}
+      android_flavor: ${{ inputs.android_flavor }}
+      ios_scheme: ${{ inputs.ios_scheme }}
+      ios_configuration: ${{ inputs.ios_configuration }}
+      ios_workspace: ${{ inputs.ios_workspace }}
+      ios_export_method: ${{ inputs.ios_export_method }}
+      artifact_retention_days: ${{ inputs.artifact_retention_days }}
+    secrets: inherit
+
+  # Optional: post-build job using workflow outputs (e.g. post summary to Slack or PR)
+  # notify:
+  #   needs: build
+  #   if: always()
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Show summary
+  #       run: |
+  #         echo "${{ needs.build.outputs.summary_markdown }}"
+  #         echo "Failed job(s): ${{ needs.build.outputs.failed_job }}"

@@ -1,0 +1,638 @@
+# Reusable workflow: Mobile CI Engine
+# Build Android and/or iOS apps (React Native, Native, Expo) on GitHub Actions.
+# Call via workflow_call only; manual dispatch from caller repo.
+# Replaces EAS Build — no EAS dependency.
+#
+# Secrets: Callers must pass secrets using `secrets: inherit` in the job that
+# calls this workflow. No secrets block is declared here (GitHub does not support
+# "pass-through"; inherit on the caller side forwards all repo secrets to this workflow).
+
+name: Mobile Build
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: 'Platform to build: android, ios, or both'
+        required: false
+        default: 'both'
+        type: string
+      build_type:
+        description: 'Build type: apk, aab, or release (omit or use release for auto-detect)'
+        required: false
+        default: ''
+        type: string
+      environment:
+        description: 'Environment: staging or production'
+        required: false
+        default: 'staging'
+        type: string
+      version_bump:
+        description: 'Run caller ci:version-bump script if present'
+        required: false
+        default: false
+        type: boolean
+      android_module:
+        description: 'Gradle module name (e.g. app or mobile)'
+        required: false
+        default: 'app'
+        type: string
+      android_flavor:
+        description: 'Android product flavor (optional)'
+        required: false
+        default: ''
+        type: string
+      ios_scheme:
+        description: 'Xcode scheme (auto if empty)'
+        required: false
+        default: ''
+        type: string
+      ios_configuration:
+        description: 'Xcode configuration: Debug or Release'
+        required: false
+        default: ''
+        type: string
+      ios_workspace:
+        description: 'Path to .xcworkspace or .xcodeproj relative to ios/ (auto if empty)'
+        required: false
+        default: ''
+        type: string
+      ios_export_method:
+        description: 'IPA export method: app-store, ad-hoc, enterprise, development (auto from environment if empty)'
+        required: false
+        default: ''
+        type: string
+      artifact_retention_days:
+        description: 'Artifact retention in days'
+        required: false
+        default: 14
+        type: number
+    outputs:
+      summary_markdown:
+        value: ${{ jobs.summary.outputs.summary_markdown }}
+      failed_job:
+        value: ${{ jobs.summary.outputs.failed_job }}
+
+concurrency:
+  group: mobile-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    outputs:
+      has_android: ${{ steps.detect.outputs.has_android }}
+      has_ios: ${{ steps.detect.outputs.has_ios }}
+      project_type: ${{ steps.detect.outputs.project_type }}
+      platform: ${{ steps.vars.outputs.platform }}
+      environment: ${{ steps.vars.outputs.environment }}
+      app_version: ${{ steps.detect.outputs.app_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate inputs and detect project
+        id: vars
+        run: |
+          PLATFORM="${{ inputs.platform }}"
+          BUILD_TYPE="${{ inputs.build_type }}"
+          ENV="${{ inputs.environment }}"
+          EXPORT_METHOD="${{ inputs.ios_export_method }}"
+          if [[ "$PLATFORM" != "android" && "$PLATFORM" != "ios" && "$PLATFORM" != "both" ]]; then
+            echo "::error::Invalid platform: $PLATFORM. Use android, ios, or both."
+            exit 1
+          fi
+          if [[ -n "$BUILD_TYPE" && "$BUILD_TYPE" != "apk" && "$BUILD_TYPE" != "aab" && "$BUILD_TYPE" != "release" ]]; then
+            echo "::error::Invalid build_type: $BUILD_TYPE. Use apk, aab, or release."
+            exit 1
+          fi
+          if [[ "$ENV" != "staging" && "$ENV" != "production" ]]; then
+            echo "::error::Invalid environment: $ENV. Use staging or production."
+            exit 1
+          fi
+          if [[ -n "$EXPORT_METHOD" ]]; then
+            if [[ "$EXPORT_METHOD" != "app-store" && "$EXPORT_METHOD" != "ad-hoc" && "$EXPORT_METHOD" != "enterprise" && "$EXPORT_METHOD" != "development" ]]; then
+              echo "::error::Invalid ios_export_method: $EXPORT_METHOD. Use app-store, ad-hoc, enterprise, or development."
+              exit 1
+            fi
+          fi
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+          echo "environment=$ENV" >> "$GITHUB_OUTPUT"
+
+      - name: Detect project and check secrets
+        id: detect
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          HAS_ANDROID="false"
+          HAS_IOS="false"
+          PROJECT_TYPE="unknown"
+          if [[ -d "android" ]]; then HAS_ANDROID="true"; fi
+          if [[ -d "ios" ]]; then HAS_IOS="true"; fi
+          if [[ -f "package.json" ]] && grep -q '"expo"' package.json 2>/dev/null; then
+            PROJECT_TYPE="expo"
+          elif [[ -f "package.json" ]] && (grep -q '"react-native"' package.json 2>/dev/null); then
+            PROJECT_TYPE="react-native"
+          else
+            PROJECT_TYPE="native"
+          fi
+          echo "has_android=$HAS_ANDROID" >> "$GITHUB_OUTPUT"
+          echo "has_ios=$HAS_IOS" >> "$GITHUB_OUTPUT"
+          echo "project_type=$PROJECT_TYPE" >> "$GITHUB_OUTPUT"
+          APP_VERSION=$(node -p "require('./package.json').version || '0.0.0'" 2>/dev/null | tr -d '"' || echo "0.0.0")
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+
+          # iOS: require signing secrets for any IPA
+          if [[ "$PLATFORM" == "ios" || "$PLATFORM" == "both" ]]; then
+            if [[ -z "${{ secrets.IOS_CERT_BASE64 }}" || -z "${{ secrets.IOS_CERT_PASSWORD }}" || -z "${{ secrets.IOS_PROFILE_BASE64 }}" ]]; then
+              echo "::error::iOS builds require signing. Add secrets: IOS_CERT_BASE64, IOS_CERT_PASSWORD, IOS_PROFILE_BASE64."
+              exit 1
+            fi
+            if [[ "$HAS_IOS" != "true" && "$PROJECT_TYPE" != "expo" ]]; then
+              echo "::error::iOS requested but no ios/ folder found. Add ios/ or use an Expo project."
+              exit 1
+            fi
+          fi
+
+          # Android production: require signing secrets
+          if [[ "$PLATFORM" == "android" || "$PLATFORM" == "both" ]]; then
+            if [[ "$ENVIRONMENT" == "production" ]]; then
+              if [[ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" || -z "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" || -z "${{ secrets.ANDROID_KEY_ALIAS }}" || -z "${{ secrets.ANDROID_KEY_PASSWORD }}" ]]; then
+                echo "::error::Production Android build requires secrets: ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD."
+                exit 1
+              fi
+            fi
+            if [[ "$HAS_ANDROID" != "true" && "$PROJECT_TYPE" != "expo" ]]; then
+              echo "::error::Android requested but no android/ folder found. Add android/ or use an Expo project."
+              exit 1
+            fi
+          fi
+
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    needs: validate
+    if: ${{ needs.validate.outputs.platform == 'android' || needs.validate.outputs.platform == 'both' }}
+    outputs:
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
+      duration_sec: ${{ steps.build.outputs.duration_sec }}
+      checksum: ${{ steps.checksum.outputs.sha256 }}
+      artifact_size: ${{ steps.meta.outputs.artifact_size }}
+      build_type: ${{ steps.build.outputs.build_type }}
+    env:
+      ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact_retention_days }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        id: setup-node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: 'npm'
+        continue-on-error: true
+
+      - name: Setup Node.js (fallback)
+        if: steps.setup-node.outcome == 'failure'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup pnpm
+        if: ${{ hashFiles('pnpm-lock.yaml') != '' }}
+        uses: pnpm/action-setup@v4
+
+      - name: Cache node modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-${{ runner.os }}-${{ hashFiles('package-lock.json', 'yarn.lock', 'pnpm-lock.yaml') }}
+          restore-keys: |
+            node-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          if [[ -f "pnpm-lock.yaml" ]]; then pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+          elif [[ -f "yarn.lock" ]]; then yarn install --frozen-lockfile 2>/dev/null || yarn install
+          else npm ci 2>/dev/null || npm install
+          fi
+
+      - name: Version bump (optional)
+        if: ${{ inputs.version_bump }}
+        run: |
+          if grep -q '"ci:version-bump"\|"version-bump"' package.json 2>/dev/null; then
+            npm run ci:version-bump 2>/dev/null || npm run version-bump 2>/dev/null || echo "::warning::version_bump requested but no version-bump script found; skipping"
+          else
+            echo "::warning::version_bump requested but no version-bump script found; skipping"
+          fi
+
+      - name: Expo prebuild (if Expo)
+        if: ${{ needs.validate.outputs.project_type == 'expo' }}
+        run: npx expo prebuild --no-install
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/gradle-wrapper.properties', 'android/build.gradle', 'android/**/build.gradle') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Decode keystore (production)
+        if: ${{ needs.validate.outputs.environment == 'production' }}
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/keystore.jks"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/keystore.jks" >> "$GITHUB_ENV"
+
+      - name: Build Android
+        id: build
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          START=$(date +%s)
+          cd android
+          MODULE="${{ inputs.android_module }}"
+          FLAVOR="${{ inputs.android_flavor }}"
+          BT="${{ inputs.build_type }}"
+          ENV="${{ needs.validate.outputs.environment }}"
+          if [[ -z "$BT" || "$BT" == "release" ]]; then
+            if [[ "$ENV" == "production" ]] && ./gradlew ":${MODULE}:tasks" --all 2>/dev/null | grep -q "bundleRelease"; then
+              BT="aab"
+            else
+              BT="apk"
+            fi
+          fi
+          if [[ -n "$FLAVOR" ]]; then
+            CAP_FLAVOR="$(echo "${FLAVOR:0:1}" | tr '[:lower:]' '[:upper:]')${FLAVOR:1}"
+            if [[ "$BT" == "aab" ]]; then
+              ./gradlew ":${MODULE}:bundle${CAP_FLAVOR}Release" --no-daemon
+            else
+              ./gradlew ":${MODULE}:assemble${CAP_FLAVOR}Release" --no-daemon
+            fi
+          else
+            if [[ "$BT" == "aab" ]]; then
+              ./gradlew ":${MODULE}:bundleRelease" --no-daemon
+            else
+              ./gradlew ":${MODULE}:assembleRelease" --no-daemon
+            fi
+          fi
+          END=$(date +%s)
+          echo "duration_sec=$((END - START))" >> "$GITHUB_OUTPUT"
+          echo "build_type=$BT" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare artifact names and output meta
+        id: meta
+        run: |
+          APP_NAME=$(node -p "require('./package.json').name || 'app'" 2>/dev/null | tr -d '"' | tr '/' '-' || echo "app")
+          VERSION=$(node -p "require('./package.json').version || '0.0.0'" 2>/dev/null | tr -d '"' || echo "0.0.0")
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TS=$(date +%Y%m%d%H%M%S)
+          MODULE="${{ inputs.android_module }}"
+          mkdir -p "$RUNNER_TEMP/android-artifact"
+          F=$(find "android/${MODULE}/build/outputs" -name "*.aab" 2>/dev/null | head -1)
+          [[ -z "$F" ]] && F=$(find "android/${MODULE}/build/outputs" -name "*.apk" 2>/dev/null | head -1)
+          if [[ -n "$F" ]]; then
+            EXT="${F##*.}"
+            echo "artifact_name=${APP_NAME}_android_${VERSION}_${SHORT_SHA}_${TS}.${EXT}" >> "$GITHUB_OUTPUT"
+            SIZE=$(stat -c%s "$F" 2>/dev/null || echo "0")
+            echo "artifact_size=$SIZE" >> "$GITHUB_OUTPUT"
+            cp "$F" "$RUNNER_TEMP/android-artifact/${APP_NAME}_android_${VERSION}_${SHORT_SHA}_${TS}.${EXT}"
+            MAP=$(find "android/${MODULE}/build" -name "mapping.txt" 2>/dev/null | head -1)
+            if [[ -n "$MAP" ]]; then cp "$MAP" "$RUNNER_TEMP/android-artifact/"; fi
+          else
+            echo "artifact_name=" >> "$GITHUB_OUTPUT"
+            echo "artifact_size=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Output Android checksum
+        id: checksum
+        run: |
+          MODULE="${{ inputs.android_module }}"
+          F=$(find "android/${MODULE}/build/outputs" -name "*.apk" -o -name "*.aab" 2>/dev/null | head -1)
+          if [[ -n "$F" ]]; then
+            echo "sha256=$(sha256sum "$F" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha256=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload Android artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/android-artifact/
+          retention-days: ${{ inputs.artifact_retention_days }}
+        continue-on-error: true
+
+      - name: Remove keystore (production)
+        if: ${{ always() && needs.validate.outputs.environment == 'production' }}
+        run: rm -f "$RUNNER_TEMP/keystore.jks" 2>/dev/null || true
+
+  ios:
+    name: iOS
+    runs-on: macos-latest
+    needs: validate
+    if: ${{ needs.validate.outputs.platform == 'ios' || needs.validate.outputs.platform == 'both' }}
+    outputs:
+      artifact_name: ${{ steps.ios_meta.outputs.artifact_name }}
+      duration_sec: ${{ steps.build.outputs.duration_sec }}
+      checksum: ${{ steps.checksum.outputs.sha256 }}
+      artifact_size: ${{ steps.ios_meta.outputs.artifact_size }}
+    env:
+      ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact_retention_days }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Setup Node.js
+        id: setup-node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: 'npm'
+        continue-on-error: true
+
+      - name: Setup Node.js (fallback)
+        if: steps.setup-node.outcome == 'failure'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup pnpm
+        if: ${{ hashFiles('pnpm-lock.yaml') != '' }}
+        uses: pnpm/action-setup@v4
+
+      - name: Cache node modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-${{ runner.os }}-${{ hashFiles('package-lock.json', 'yarn.lock', 'pnpm-lock.yaml') }}
+          restore-keys: |
+            node-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          if [[ -f "pnpm-lock.yaml" ]]; then pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+          elif [[ -f "yarn.lock" ]]; then yarn install --frozen-lockfile 2>/dev/null || yarn install
+          else npm ci 2>/dev/null || npm install
+          fi
+
+      - name: Version bump (optional)
+        if: ${{ inputs.version_bump }}
+        run: |
+          if grep -q '"ci:version-bump"\|"version-bump"' package.json 2>/dev/null; then
+            npm run ci:version-bump 2>/dev/null || npm run version-bump 2>/dev/null || echo "::warning::version_bump requested but no version-bump script found; skipping"
+          else
+            echo "::warning::version_bump requested but no version-bump script found; skipping"
+          fi
+
+      - name: Expo prebuild (if Expo)
+        if: ${{ needs.validate.outputs.project_type == 'expo' }}
+        run: npx expo prebuild --no-install
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/Pods
+            ~/Library/Caches/CocoaPods
+          key: cocoapods-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: |
+            cocoapods-${{ runner.os }}-
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: deriveddata-${{ runner.os }}-${{ hashFiles('ios/**/*.xcodeproj/project.pbxproj', 'ios/**/*.xcworkspace/contents.xcworkspacedata') }}
+          restore-keys: |
+            deriveddata-${{ runner.os }}-
+
+      - name: Install CocoaPods
+        run: |
+          if [[ -f "Gemfile" ]]; then
+            bundle install
+            bundle exec pod install --project-directory=ios
+          elif [[ -f "ios/Gemfile" ]]; then
+            cd ios
+            bundle install
+            bundle exec pod install
+          else
+            cd ios && pod install
+          fi
+
+      - name: Create keychain and import signing
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p "" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+          echo "${{ secrets.IOS_CERT_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          echo "${{ secrets.IOS_PROFILE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" -P "${{ secrets.IOS_CERT_PASSWORD }}" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN_PATH"
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$RUNNER_TEMP/profile.mobileprovision" ~/Library/MobileDevice/Provisioning\ Profiles/
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Generate ExportOptions.plist
+        run: |
+          EXPORT_METHOD="${{ inputs.ios_export_method }}"
+          if [[ -z "$EXPORT_METHOD" ]]; then
+            if [[ "${{ inputs.environment }}" == "production" ]]; then EXPORT_METHOD="app-store"; else EXPORT_METHOD="development"; fi
+          fi
+          security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" -o "$RUNNER_TEMP/decoded_provision.plist" 2>/dev/null || true
+          plutil -convert xml1 "$RUNNER_TEMP/decoded_provision.plist" 2>/dev/null || true
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$RUNNER_TEMP/decoded_provision.plist" 2>/dev/null || echo "")
+          APP_ID_FULL=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$RUNNER_TEMP/decoded_provision.plist" 2>/dev/null || echo "")
+          BUNDLE_ID="${APP_ID_FULL#*.}"
+          if [[ -z "$PROFILE_NAME" || -z "$BUNDLE_ID" ]]; then
+            cat << PLISTFALLBACK > "$RUNNER_TEMP/ExportOptions.plist"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>${EXPORT_METHOD}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+          </dict>
+          </plist>
+          PLISTFALLBACK
+          else
+            cat << PLISTEOF > "$RUNNER_TEMP/ExportOptions.plist"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>${EXPORT_METHOD}</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key>
+              <string>${PROFILE_NAME}</string>
+            </dict>
+            <key>signingStyle</key>
+            <string>manual</string>
+          </dict>
+          </plist>
+          PLISTEOF
+          fi
+          echo "EXPORT_OPTIONS_PLIST=$RUNNER_TEMP/ExportOptions.plist" >> "$GITHUB_ENV"
+
+      - name: Build iOS
+        id: build
+        env:
+          IOS_WORKSPACE_INPUT: ${{ inputs.ios_workspace }}
+        run: |
+          START=$(date +%s)
+          cd ios
+          SCHEME="${{ inputs.ios_scheme }}"
+          CONFIG="${{ inputs.ios_configuration }}"
+          if [[ -z "$CONFIG" ]]; then
+            if [[ "${{ inputs.environment }}" == "production" ]]; then CONFIG="Release"; else CONFIG="Debug"; fi
+          fi
+          if [[ -z "$SCHEME" ]]; then
+            SCHEME=$(xcodebuild -list -json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    root = data.get('project', data.get('workspace', {}))
+    schemes = root.get('schemes', [])
+    print(schemes[0] if schemes else '')
+except Exception:
+    print('')" 2>/dev/null || echo "")
+          fi
+          if [[ -z "$SCHEME" ]]; then SCHEME="MyApp"; fi
+          if [[ -n "$IOS_WORKSPACE_INPUT" ]]; then
+            WS="${IOS_WORKSPACE_INPUT#ios/}"
+          else
+            WS=$(find . -maxdepth 2 -name "*.xcworkspace" ! -path "*/Pods/*" | head -1)
+            if [[ -z "$WS" ]]; then WS=$(find . -maxdepth 2 -name "*.xcodeproj" | head -1); fi
+          fi
+          if [[ "$WS" == *.xcworkspace ]]; then
+            XC_WORKSPACE="-workspace $WS"
+          else
+            XC_WORKSPACE="-project $WS"
+          fi
+          # Signed build first (required for production IPA)
+          if ! xcodebuild $XC_WORKSPACE -scheme "$SCHEME" -configuration "$CONFIG" -destination 'generic/platform=iOS' -allowProvisioningUpdates archive -archivePath "$RUNNER_TEMP/App.xcarchive"; then
+            # Fallback to unsigned only for debug/staging
+            xcodebuild $XC_WORKSPACE -scheme "$SCHEME" -configuration "$CONFIG" -destination 'generic/platform=iOS' -allowProvisioningUpdates archive -archivePath "$RUNNER_TEMP/App.xcarchive" CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+          fi
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/App.xcarchive" -exportPath "$RUNNER_TEMP/ipa" -exportOptionsPlist "$EXPORT_OPTIONS_PLIST"
+          END=$(date +%s)
+          echo "duration_sec=$((END - START))" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare iOS artifact (IPA + dSYM) with spec naming
+        id: ios_meta
+        run: |
+          APP_NAME=$(node -p "require('./package.json').name || 'app'" 2>/dev/null | tr -d '"' | tr '/' '-' || echo "app")
+          VERSION=$(node -p "require('./package.json').version || '0.0.0'" 2>/dev/null | tr -d '"' || echo "0.0.0")
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TS=$(date +%Y%m%d%H%M%S)
+          IPA=$(find "$RUNNER_TEMP/ipa" -name "*.ipa" 2>/dev/null | head -1)
+          mkdir -p "$RUNNER_TEMP/ios-artifact"
+          if [[ -n "$IPA" ]]; then
+            ARTIFACT_FILENAME="${APP_NAME}_ios_${VERSION}_${SHORT_SHA}_${TS}.ipa"
+            cp "$IPA" "$RUNNER_TEMP/ios-artifact/${ARTIFACT_FILENAME}"
+            echo "artifact_name=${ARTIFACT_FILENAME}" >> "$GITHUB_OUTPUT"
+            SIZE=$(stat -f%z "$IPA" 2>/dev/null || echo "0")
+            echo "artifact_size=$SIZE" >> "$GITHUB_OUTPUT"
+          else
+            echo "artifact_name=" >> "$GITHUB_OUTPUT"
+            echo "artifact_size=0" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ -d "$RUNNER_TEMP/App.xcarchive/dSYMs" ]]; then
+            cp -R "$RUNNER_TEMP/App.xcarchive/dSYMs" "$RUNNER_TEMP/ios-artifact/"
+          fi
+
+      - name: Output iOS checksum
+        id: checksum
+        run: |
+          F=$(find "$RUNNER_TEMP/ipa" -name "*.ipa" 2>/dev/null | head -1)
+          if [[ -n "$F" ]]; then
+            echo "sha256=$(shasum -a 256 "$F" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha256=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload iOS artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/ios-artifact/
+          retention-days: ${{ inputs.artifact_retention_days }}
+        continue-on-error: true
+
+      - name: Remove keychain and signing
+        if: always()
+        run: |
+          security lock-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/profile.mobileprovision" 2>/dev/null || true
+
+  summary:
+    name: Summary
+    runs-on: ubuntu-latest
+    needs: [validate, android, ios]
+    if: ${{ always() }}
+    outputs:
+      summary_markdown: ${{ steps.summary.outputs.summary_markdown }}
+      failed_job: ${{ steps.summary.outputs.failed_job }}
+    steps:
+      - name: Build summary
+        id: summary
+        run: |
+          FAILED=""
+          [[ "${{ needs.validate.result }}" != "success" ]] && FAILED="validate"
+          [[ "${{ needs.android.result }}" != "success" && "${{ needs.android.result }}" != "skipped" ]] && FAILED="${FAILED:+$FAILED, }android"
+          [[ "${{ needs.ios.result }}" != "success" && "${{ needs.ios.result }}" != "skipped" ]] && FAILED="${FAILED:+$FAILED, }ios"
+          BT="${{ inputs.build_type }}"
+          [[ -z "$BT" || "$BT" == "release" ]] && BT="(auto)"
+          [[ "${{ needs.android.outputs.build_type }}" != "" ]] && BT="${{ needs.android.outputs.build_type }}"
+          SUMMARY="## Mobile Build Summary\n\n"
+          SUMMARY="${SUMMARY}- **Platform:** ${{ needs.validate.outputs.platform }}\n"
+          SUMMARY="${SUMMARY}- **Build type:** ${BT}\n"
+          SUMMARY="${SUMMARY}- **Version:** ${{ needs.validate.outputs.app_version }}\n"
+          SUMMARY="${SUMMARY}- **Environment:** ${{ needs.validate.outputs.environment }}\n"
+          SUMMARY="${SUMMARY}- **Commit:** ${{ github.sha }}\n"
+          if [[ -n "$FAILED" ]]; then
+            SUMMARY="${SUMMARY}- **Failed job(s):** ${FAILED}\n"
+            SUMMARY="${SUMMARY}\nAdd required secrets or fix build errors. See docs/secrets.md and docs/troubleshooting.md."
+          else
+            SUMMARY="${SUMMARY}- **Status:** Success\n"
+            [[ "${{ needs.android.outputs.duration_sec }}" != "" ]] && SUMMARY="${SUMMARY}- **Android duration:** ${{ needs.android.outputs.duration_sec }}s\n"
+            [[ "${{ needs.ios.outputs.duration_sec }}" != "" ]] && SUMMARY="${SUMMARY}- **iOS duration:** ${{ needs.ios.outputs.duration_sec }}s\n"
+            [[ "${{ needs.android.outputs.artifact_size }}" != "" && "${{ needs.android.outputs.artifact_size }}" != "0" ]] && SUMMARY="${SUMMARY}- **Android artifact size:** ${{ needs.android.outputs.artifact_size }} bytes\n"
+            [[ "${{ needs.ios.outputs.artifact_size }}" != "" && "${{ needs.ios.outputs.artifact_size }}" != "0" ]] && SUMMARY="${SUMMARY}- **iOS artifact size:** ${{ needs.ios.outputs.artifact_size }} bytes\n"
+            SUMMARY="${SUMMARY}- **Cache:** Node, Gradle, CocoaPods (and DerivedData) restored per job\n"
+            [[ -n "${{ needs.android.outputs.checksum }}" ]] && SUMMARY="${SUMMARY}- **Android artifact SHA256:** ${{ needs.android.outputs.checksum }}\n"
+            [[ -n "${{ needs.ios.outputs.checksum }}" ]] && SUMMARY="${SUMMARY}- **iOS artifact SHA256:** ${{ needs.ios.outputs.checksum }}\n"
+          fi
+          echo "summary_markdown<<EOF" >> "$GITHUB_OUTPUT"
+          echo -e "$SUMMARY" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "failed_job=$FAILED" >> "$GITHUB_OUTPUT"
+          echo -e "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
