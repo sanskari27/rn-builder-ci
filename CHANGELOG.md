@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Android** job (Ubuntu): checkout, Node and Gradle caching, optional version bump, Expo prebuild when applicable, Java 17, ephemeral keystore for production signing, build (APK/AAB), checksum, artifact upload.
 - **iOS** job (macOS): checkout, Node and CocoaPods caching, optional version bump, Expo prebuild when applicable, ephemeral keychain and signing, Xcode build and export, checksum, artifact upload.
 - **Summary** job (Ubuntu): structured build summary (platform, environment, commit, status, artifact checksums) and optional job summary output.
-- Inputs: `platform`, `build_type`, `environment`, `version_bump`, `android_module`, `android_flavor`, `ios_scheme`, `ios_configuration`, `ios_workspace`, `ios_export_method`, `artifact_retention_days`.
+- Inputs: `platform`, `build_type`, `environment` only (3 inputs for initial React Native setup). Android module `app`, iOS scheme/workspace/export auto from `ios/`, artifact retention 14 days, version bump skipped.
 - Concurrency: cancel in-progress runs on the same branch.
 - Documentation: usage, secrets, troubleshooting, architecture.
 - Example caller workflow and migration guidance from EAS Build.

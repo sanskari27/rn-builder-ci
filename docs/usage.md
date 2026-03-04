@@ -26,6 +26,12 @@ on:
           - android
           - ios
           - both
+      build_type:
+        description: 'Build type (empty = auto)'
+        required: false
+        default: ''
+        type: choice
+        options: [ '', apk, aab, release ]
       environment:
         description: 'Environment'
         required: true
@@ -43,6 +49,7 @@ jobs:
     uses: sanskari27/rn-builder-ci/.github/workflows/mobile-build.yml@v1
     with:
       platform: ${{ inputs.platform }}
+      build_type: ${{ inputs.build_type }}
       environment: ${{ inputs.environment }}
     secrets: inherit
 ```
@@ -67,21 +74,15 @@ If you omit these, the workflow will fail validation (for iOS) or build with the
 3. Click **Run workflow**, choose branch and inputs (platform, environment, etc.).
 4. After the run, download artifacts from the run summary.
 
-## Inputs (optional)
+## Inputs (3 only — for initial React Native setup)
 
 | Input | Default | Description |
 |-------|--------|-------------|
 | `platform` | `both` | `android`, `ios`, or `both` |
-| `build_type` | (auto) | `apk`, `aab`, or `release` (release = auto-detect) |
+| `build_type` | (auto) | `apk`, `aab`, or `release` (empty = auto: apk for staging, aab for production when available) |
 | `environment` | `staging` | `staging` or `production` |
-| `version_bump` | `false` | If true, runs `ci:version-bump` (or similar) from your `package.json` if present |
-| `android_module` | `app` | Gradle module name (e.g. for multi-module projects) |
-| `android_flavor` | (none) | Android product flavor |
-| `ios_scheme` | (auto) | Xcode scheme |
-| `ios_configuration` | (env-based) | `Debug` or `Release` |
-| `ios_workspace` | (auto) | Path to `.xcworkspace` or `.xcodeproj` relative to `ios/` (e.g. `MyApp.xcworkspace`) |
-| `ios_export_method` | (env-based) | IPA export: `app-store`, `ad-hoc`, `enterprise`, or `development` |
-| `artifact_retention_days` | `14` | How long to keep uploaded artifacts |
+
+**Fixed/auto in the engine:** Android uses module `app`, no flavors; iOS scheme and workspace are auto-detected under `ios/`; configuration and export method are derived from `environment`; artifact retention is 14 days; version bump is skipped.
 
 **Build-time configuration:** The caller workflow's `env:` block is **not** passed into the reusable workflow (GitHub Actions does not forward job-level env to called workflows). For API URLs, feature flags, etc., use your app's normal mechanism (e.g. `.env` files, `app.config.js`, or repository variables in steps that run in the engine).
 

@@ -53,9 +53,9 @@ Common failures and how to fix them.
 ### iOS: Xcode or export fails
 
 - **Signing:** Ensure the provisioning profile matches the certificate and your app’s bundle ID. The profile must be installed (the workflow imports the one you provide).
-- **Scheme:** If you have multiple schemes, set `ios_scheme` to the one that builds the app.
-- **Workspace:** If you have multiple `.xcworkspace` or `.xcodeproj` under `ios/`, set `ios_workspace` to the path relative to `ios/` (e.g. `MyApp.xcworkspace`). If you pass `ios/MyApp.xcworkspace`, the `ios/` prefix is stripped automatically.
-- **Export / IPA:** The workflow generates `ExportOptions.plist` from your provisioning profile (method + bundle ID → profile name). If export still fails, set `ios_export_method` explicitly (`app-store`, `ad-hoc`, `enterprise`, or `development`) to match your profile type. For apps with extensions (multiple bundle IDs), the generated plist may need manual provisioning profile entries—document your export requirements or use a repo-owned `ExportOptions.plist` if the engine adds support for it.
+- **Scheme:** The workflow auto-detects the first scheme from your workspace/project under `ios/`. If you have multiple schemes and the wrong one is chosen, ensure the app scheme is listed first or the engine would need to support an override (currently it does not).
+- **Workspace:** The workflow auto-detects the first `.xcworkspace` (or `.xcodeproj`) under `ios/` (excluding Pods). Ensure your project has exactly one workspace/project at the top level of `ios/`, or the first one found will be used.
+- **Export / IPA:** The workflow generates `ExportOptions.plist` from your provisioning profile; export method is derived from `environment` (staging → development, production → app-store). For apps with extensions (multiple bundle IDs), the generated plist may need manual provisioning profile entries—document your export requirements or use a repo-owned `ExportOptions.plist` if the engine adds support for it.
 
 ### "version_bump requested but no version-bump script found"
 

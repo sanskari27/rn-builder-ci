@@ -27,46 +27,6 @@ on:
         required: false
         default: 'staging'
         type: string
-      version_bump:
-        description: 'Run caller ci:version-bump script if present'
-        required: false
-        default: false
-        type: boolean
-      android_module:
-        description: 'Gradle module name (e.g. app or mobile)'
-        required: false
-        default: 'app'
-        type: string
-      android_flavor:
-        description: 'Android product flavor (optional)'
-        required: false
-        default: ''
-        type: string
-      ios_scheme:
-        description: 'Xcode scheme (auto if empty)'
-        required: false
-        default: ''
-        type: string
-      ios_configuration:
-        description: 'Xcode configuration: Debug or Release'
-        required: false
-        default: ''
-        type: string
-      ios_workspace:
-        description: 'Path to .xcworkspace or .xcodeproj relative to ios/ (auto if empty)'
-        required: false
-        default: ''
-        type: string
-      ios_export_method:
-        description: 'IPA export method: app-store, ad-hoc, enterprise, development (auto from environment if empty)'
-        required: false
-        default: ''
-        type: string
-      artifact_retention_days:
-        description: 'Artifact retention in days'
-        required: false
-        default: 14
-        type: number
     outputs:
       summary_markdown:
         value: ${{ jobs.summary.outputs.summary_markdown }}
@@ -98,7 +58,6 @@ jobs:
           PLATFORM="${{ inputs.platform }}"
           BUILD_TYPE="${{ inputs.build_type }}"
           ENV="${{ inputs.environment }}"
-          EXPORT_METHOD="${{ inputs.ios_export_method }}"
           if [[ "$PLATFORM" != "android" && "$PLATFORM" != "ios" && "$PLATFORM" != "both" ]]; then
             echo "::error::Invalid platform: $PLATFORM. Use android, ios, or both."
             exit 1
@@ -110,12 +69,6 @@ jobs:
           if [[ "$ENV" != "staging" && "$ENV" != "production" ]]; then
             echo "::error::Invalid environment: $ENV. Use staging or production."
             exit 1
-          fi
-          if [[ -n "$EXPORT_METHOD" ]]; then
-            if [[ "$EXPORT_METHOD" != "app-store" && "$EXPORT_METHOD" != "ad-hoc" && "$EXPORT_METHOD" != "enterprise" && "$EXPORT_METHOD" != "development" ]]; then
-              echo "::error::Invalid ios_export_method: $EXPORT_METHOD. Use app-store, ad-hoc, enterprise, or development."
-              exit 1
-            fi
           fi
           echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
           echo "environment=$ENV" >> "$GITHUB_OUTPUT"
@@ -182,7 +135,7 @@ jobs:
       artifact_size: ${{ steps.meta.outputs.artifact_size }}
       build_type: ${{ steps.build.outputs.build_type }}
     env:
-      ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact_retention_days }}
+      ARTIFACT_RETENTION_DAYS: 14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -222,7 +175,7 @@ jobs:
           fi
 
       - name: Version bump (optional)
-        if: ${{ inputs.version_bump }}
+        if: false
         run: |
           if grep -q '"ci:version-bump"\|"version-bump"' package.json 2>/dev/null; then
             npm run ci:version-bump 2>/dev/null || npm run version-bump 2>/dev/null || echo "::warning::version_bump requested but no version-bump script found; skipping"
@@ -265,8 +218,8 @@ jobs:
         run: |
           START=$(date +%s)
           cd android
-          MODULE="${{ inputs.android_module }}"
-          FLAVOR="${{ inputs.android_flavor }}"
+          MODULE="app"
+          FLAVOR=""
           BT="${{ inputs.build_type }}"
           ENV="${{ needs.validate.outputs.environment }}"
           if [[ -z "$BT" || "$BT" == "release" ]]; then
@@ -301,7 +254,7 @@ jobs:
           VERSION=$(node -p "require('./package.json').version || '0.0.0'" 2>/dev/null | tr -d '"' || echo "0.0.0")
           SHORT_SHA="${GITHUB_SHA::7}"
           TS=$(date +%Y%m%d%H%M%S)
-          MODULE="${{ inputs.android_module }}"
+          MODULE="app"
           mkdir -p "$RUNNER_TEMP/android-artifact"
           F=$(find "android/${MODULE}/build/outputs" -name "*.aab" 2>/dev/null | head -1)
           [[ -z "$F" ]] && F=$(find "android/${MODULE}/build/outputs" -name "*.apk" 2>/dev/null | head -1)
@@ -321,7 +274,7 @@ jobs:
       - name: Output Android checksum
         id: checksum
         run: |
-          MODULE="${{ inputs.android_module }}"
+          MODULE="app"
           F=$(find "android/${MODULE}/build/outputs" -name "*.apk" -o -name "*.aab" 2>/dev/null | head -1)
           if [[ -n "$F" ]]; then
             echo "sha256=$(sha256sum "$F" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
@@ -335,7 +288,7 @@ jobs:
         with:
           name: android-${{ github.sha }}-${{ github.run_id }}
           path: ${{ runner.temp }}/android-artifact/
-          retention-days: ${{ inputs.artifact_retention_days }}
+          retention-days: 14
         continue-on-error: true
 
       - name: Remove keystore (production)
@@ -353,7 +306,7 @@ jobs:
       checksum: ${{ steps.checksum.outputs.sha256 }}
       artifact_size: ${{ steps.ios_meta.outputs.artifact_size }}
     env:
-      ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact_retention_days }}
+      ARTIFACT_RETENTION_DAYS: 14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -398,7 +351,7 @@ jobs:
           fi
 
       - name: Version bump (optional)
-        if: ${{ inputs.version_bump }}
+        if: false
         run: |
           if grep -q '"ci:version-bump"\|"version-bump"' package.json 2>/dev/null; then
             npm run ci:version-bump 2>/dev/null || npm run version-bump 2>/dev/null || echo "::warning::version_bump requested but no version-bump script found; skipping"
@@ -457,10 +410,7 @@ jobs:
 
       - name: Generate ExportOptions.plist
         run: |
-          EXPORT_METHOD="${{ inputs.ios_export_method }}"
-          if [[ -z "$EXPORT_METHOD" ]]; then
-            if [[ "${{ inputs.environment }}" == "production" ]]; then EXPORT_METHOD="app-store"; else EXPORT_METHOD="development"; fi
-          fi
+          if [[ "${{ inputs.environment }}" == "production" ]]; then EXPORT_METHOD="app-store"; else EXPORT_METHOD="development"; fi
           security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" -o "$RUNNER_TEMP/decoded_provision.plist" 2>/dev/null || true
           plutil -convert xml1 "$RUNNER_TEMP/decoded_provision.plist" 2>/dev/null || true
           PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$RUNNER_TEMP/decoded_provision.plist" 2>/dev/null || echo "")
@@ -502,26 +452,15 @@ jobs:
 
       - name: Build iOS
         id: build
-        env:
-          IOS_WORKSPACE_INPUT: ${{ inputs.ios_workspace }}
         run: |
           START=$(date +%s)
           cd ios
-          SCHEME="${{ inputs.ios_scheme }}"
-          CONFIG="${{ inputs.ios_configuration }}"
-          if [[ -z "$CONFIG" ]]; then
-            if [[ "${{ inputs.environment }}" == "production" ]]; then CONFIG="Release"; else CONFIG="Debug"; fi
-          fi
-          if [[ -z "$SCHEME" ]]; then
-            SCHEME=$(xcodebuild -list -json 2>/dev/null | python3 -c 'import sys, json; d=json.load(sys.stdin); r=d.get("project",d.get("workspace",{})); s=r.get("schemes",[]); print(s[0] if s else "")' 2>/dev/null || echo "")
-          fi
+          if [[ "${{ inputs.environment }}" == "production" ]]; then CONFIG="Release"; else CONFIG="Debug"; fi
+          SCHEME=$(xcodebuild -list -json 2>/dev/null | python3 -c 'import sys, json; d=json.load(sys.stdin); r=d.get("project",d.get("workspace",{})); s=r.get("schemes",[]); print(s[0] if s else "")' 2>/dev/null || echo "")
           if [[ -z "$SCHEME" ]]; then SCHEME="MyApp"; fi
-          if [[ -n "$IOS_WORKSPACE_INPUT" ]]; then
-            WS="${IOS_WORKSPACE_INPUT#ios/}"
-          else
-            WS=$(find . -maxdepth 2 -name "*.xcworkspace" ! -path "*/Pods/*" | head -1)
-            if [[ -z "$WS" ]]; then WS=$(find . -maxdepth 2 -name "*.xcodeproj" | head -1); fi
-          fi
+          # Resolve workspace/project relative to ios/ (default: first .xcworkspace or .xcodeproj)
+          WS=$(find . -maxdepth 2 -name "*.xcworkspace" ! -path "*/Pods/*" | head -1)
+          if [[ -z "$WS" ]]; then WS=$(find . -maxdepth 2 -name "*.xcodeproj" | head -1); fi
           if [[ "$WS" == *.xcworkspace ]]; then
             XC_WORKSPACE="-workspace $WS"
           else
@@ -575,7 +514,7 @@ jobs:
         with:
           name: ios-${{ github.sha }}-${{ github.run_id }}
           path: ${{ runner.temp }}/ios-artifact/
-          retention-days: ${{ inputs.artifact_retention_days }}
+          retention-days: 14
         continue-on-error: true
 
       - name: Remove keychain and signing
