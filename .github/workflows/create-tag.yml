@@ -1,0 +1,43 @@
+# Creates a git tag for the Mobile CI Engine so callers can pin to a version (e.g. @v1.0.0).
+# Run manually from the Actions tab when you want to release a new version.
+
+name: Create Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (e.g. v1.0.0)'
+        required: true
+        type: string
+      message:
+        description: 'Optional tag message'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write  # needed to push the tag
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag
+        run: |
+          TAG="${{ inputs.tag }}"
+          MSG="${{ inputs.message }}"
+          if [ -z "$MSG" ]; then MSG="Release $TAG"; fi
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$MSG"
+          git push origin "$TAG"
