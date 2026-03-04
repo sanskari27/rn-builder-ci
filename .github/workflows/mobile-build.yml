@@ -513,15 +513,7 @@ jobs:
             if [[ "${{ inputs.environment }}" == "production" ]]; then CONFIG="Release"; else CONFIG="Debug"; fi
           fi
           if [[ -z "$SCHEME" ]]; then
-            SCHEME=$(xcodebuild -list -json 2>/dev/null | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    root = data.get('project', data.get('workspace', {}))
-    schemes = root.get('schemes', [])
-    print(schemes[0] if schemes else '')
-except Exception:
-    print('')" 2>/dev/null || echo "")
+            SCHEME=$(xcodebuild -list -json 2>/dev/null | python3 -c 'import sys, json; d=json.load(sys.stdin); r=d.get("project",d.get("workspace",{})); s=r.get("schemes",[]); print(s[0] if s else "")' 2>/dev/null || echo "")
           fi
           if [[ -z "$SCHEME" ]]; then SCHEME="MyApp"; fi
           if [[ -n "$IOS_WORKSPACE_INPUT" ]]; then
