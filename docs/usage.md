@@ -86,6 +86,25 @@ If you omit these, the workflow will fail validation (for iOS) or build with the
 
 **Build-time configuration:** The caller workflow's `env:` block is **not** passed into the reusable workflow (GitHub Actions does not forward job-level env to called workflows). For API URLs, feature flags, etc., use your app's normal mechanism (e.g. `.env` files, `app.config.js`, or repository variables in steps that run in the engine).
 
+## Android ABI optimization
+
+Building only device ABIs (arm64-v8a, armeabi-v7a) instead of all four (including x86, x86_64 for emulators) can reduce Android build time by roughly **30–40%**. The workflow passes `-PABI_FILTERS=arm64-v8a,armeabi-v7a` when invoking Gradle. To use it, add the following once in your app's `android/app/build.gradle` inside the `android` block (e.g. under `defaultConfig`):
+
+```groovy
+android {
+  defaultConfig {
+    ndk {
+      abiFilters = project.hasProperty("ABI_FILTERS")
+        ? project.getProperty("ABI_FILTERS").split(",").collect { it.trim() }
+        : ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"]
+    }
+  }
+}
+```
+
+- **Without this block:** The property is ignored and your build keeps the project's default ABIs (no behavior change).
+- **With this block:** CI builds only the two device ABIs; local builds without the property still use the default list (e.g. all four).
+
 ## Workflow outputs
 
 The engine exposes two outputs you can use in a follow-up job (e.g. to post the build summary to Slack or a PR comment):

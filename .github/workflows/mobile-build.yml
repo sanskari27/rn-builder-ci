@@ -1,6 +1,6 @@
 # Reusable workflow: Mobile CI Engine
 # Build Android and/or iOS apps (React Native, Native, Expo) on GitHub Actions.
-# Call via workflow_call only; manual dispatch from caller repo.
+# Trigger: workflow_call (from another repo) or workflow_dispatch (manual run from this repo).
 # Replaces EAS Build — no EAS dependency.
 #
 # Secrets: Callers must pass secrets using `secrets: inherit` in the job that
@@ -232,15 +232,15 @@ jobs:
           if [[ -n "$FLAVOR" ]]; then
             CAP_FLAVOR="$(echo "${FLAVOR:0:1}" | tr '[:lower:]' '[:upper:]')${FLAVOR:1}"
             if [[ "$BT" == "aab" ]]; then
-              ./gradlew ":${MODULE}:bundle${CAP_FLAVOR}Release" --no-daemon
+              ./gradlew ":${MODULE}:bundle${CAP_FLAVOR}Release" --no-daemon -PABI_FILTERS=arm64-v8a,armeabi-v7a
             else
-              ./gradlew ":${MODULE}:assemble${CAP_FLAVOR}Release" --no-daemon
+              ./gradlew ":${MODULE}:assemble${CAP_FLAVOR}Release" --no-daemon -PABI_FILTERS=arm64-v8a,armeabi-v7a
             fi
           else
             if [[ "$BT" == "aab" ]]; then
-              ./gradlew ":${MODULE}:bundleRelease" --no-daemon
+              ./gradlew ":${MODULE}:bundleRelease" --no-daemon -PABI_FILTERS=arm64-v8a,armeabi-v7a
             else
-              ./gradlew ":${MODULE}:assembleRelease" --no-daemon
+              ./gradlew ":${MODULE}:assembleRelease" --no-daemon -PABI_FILTERS=arm64-v8a,armeabi-v7a
             fi
           fi
           END=$(date +%s)
